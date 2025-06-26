@@ -1,0 +1,13 @@
+{
+  "aws_project_region": "YOUR_AWS_PROJECT_REGION",
+  "aws_cognito_region": "YOUR_AWS_COGNITO_REGION",
+  "aws_user_pools_id": "YOUR_AWS_USER_POOLS_ID",
+  "aws_user_pools_web_client_id": "YOUR_AWS_USER_POOLS_WEB_CLIENT_ID",
+  "aws_cloud_logic_custom": [
+    {
+      "name": "S3ViewerHttpApi",
+      "endpoint": "YOUR_S3VIEWER_API_ENDPOINT",
+      "region": "YOUR_AWS_PROJECT_REGION"
+    }
+  ]
+}
