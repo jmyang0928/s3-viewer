@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Full-stack infrastructure for the S3 File Viewer application, using an existing
+  S3 bucket for the frontend deployment and with public sign-up disabled.
+
+Parameters:
+  FrontendBucketName:
+    Type: String
+    Description: The name of the EXISTING S3 bucket that will host the frontend files.
+    Default: s3-viewer-frontend
+
+Resources:
+  # =================================================================
+  # Frontend Resources
+  # =================================================================
+
+  CloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: OAI for the S3 Viewer frontend application
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucketName
+      PolicyDocument:
+        Statement:
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource: !Sub "arn:aws:s3:::${FrontendBucketName}/*"
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - DomainName: !Sub "${FrontendBucketName}.s3.amazonaws.com"
+            Id: !Ref FrontendBucketName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOAI}"
+        DefaultCacheBehavior:
+          TargetOriginId: !Ref FrontendBucketName
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  # =================================================================
+  # Backend Resources
+  # =================================================================
+
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: S3ViewerUserPool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      # --- START: 本次修改重點 ---
+      # 將 AllowAdminCreateUserOnly 屬性包在 AdminCreateUserConfig 物件中
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      # --- END: 修改重點 ---
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: S3ViewerWebAppClient
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlows:
+        - implicit
+        - code
+      AllowedOAuthScopes:
+        - phone
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - http://localhost:3000
+        - !Sub "https://${CloudFrontDistribution.DomainName}"
+      LogoutURLs:
+        - http://localhost:3000
+        - !Sub "https://${CloudFrontDistribution.DomainName}"
+      AllowedOAuthFlowsUserPoolClient: true
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: S3ViewerAPILambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3ViewerLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents']
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action: 's3:ListAllMyBuckets'
+                Resource: '*'
+              - Effect: Allow
+                Action: ['s3:ListBucket', 's3:GetObject']
+                Resource: ["arn:aws:s3:::*", "arn:aws:s3:::*/*"]
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: S3ViewerHttpApi
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - http://localhost:3000
+          - !Sub "https://${CloudFrontDistribution.DomainName}"
+        AllowMethods: ['GET', 'POST', 'OPTIONS']
+        AllowHeaders: ['*']
+
+  CognitoAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      Name: CognitoJwtAuthorizer
+      IdentitySource: ['$request.header.Authorization']
+      JwtConfiguration:
+        Audience: [!Ref CognitoUserPoolClient]
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: S3ViewerApiFunction
+      Handler: index.handler
+      Runtime: nodejs20.x
+      CodeUri: ./
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  GetBucketsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: GET /buckets, Target: !Join ['/', ['integrations', !Ref ApiIntegration]], AuthorizerId: !Ref CognitoAuthorizer, AuthorizationType: JWT }
+  GetObjectsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: 'GET /buckets/{bucketName}/objects', Target: !Join ['/', ['integrations', !Ref ApiIntegration]], AuthorizerId: !Ref CognitoAuthorizer, AuthorizationType: JWT }
+  PostPresignRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: POST /presign, Target: !Join ['/', ['integrations', !Ref ApiIntegration]], AuthorizerId: !Ref CognitoAuthorizer, AuthorizationType: JWT }
+  OptionsBucketsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: OPTIONS /buckets }
+  OptionsObjectsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: 'OPTIONS /buckets/{bucketName}/objects' }
+  OptionsPresignRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: OPTIONS /presign }
+
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties: { FunctionName: !GetAtt ApiFunction.Arn, Action: 'lambda:InvokeFunction', Principal: apigateway.amazonaws.com, SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*" }
+
+  ApiDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    Properties: { ApiId: !Ref HttpApi }
+    DependsOn: [GetBucketsRoute, GetObjectsRoute, PostPresignRoute, OptionsBucketsRoute, OptionsObjectsRoute, OptionsPresignRoute]
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties: { ApiId: !Ref HttpApi, StageName: $default, DeploymentId: !Ref ApiDeployment, AutoDeploy: true }
+
+Outputs:
+  Region: { Description: "AWS Region", Value: !Ref AWS::Region }
+  UserPoolId: { Description: "ID of the Cognito User Pool", Value: !Ref CognitoUserPool }
+  UserPoolClientId: { Description: "ID of the Cognito User Pool Client", Value: !Ref CognitoUserPoolClient }
+  ApiEndpoint: { Description: "Endpoint URL for the API Gateway", Value: !GetAtt HttpApi.ApiEndpoint }
+  WebAppURL:
+    Description: "The public URL for the frontend web application"
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
