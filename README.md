@@ -56,11 +56,15 @@
 3.  設定後端 API:
     - 將 `src/amplifyconfiguration.json.example` 複製為 `src/amplifyconfiguration.json`。
     - 更新 `src/amplifyconfiguration.json` 中的 API Gateway 端點 URL。
-4.  啟動前端開發伺服器:
+4.  建置前端應用程式:
     ```bash
-    npm start
+    npm run build
     ```
-5.  開啟瀏覽器並瀏覽至 `http://localhost:3000`。
+5.  將前端部署到 S3:
+    > **注意：** 請將 `s3-viewer-frontend` 換成您自己的前端 S3 儲存桶名稱。
+    ```bash
+    aws s3 sync build/ s3://s3-viewer-frontend
+    ```
 
 ## 架構
 
