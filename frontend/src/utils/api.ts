@@ -12,8 +12,9 @@ const getAuthHeaders = async (): Promise<Record<string, string>> => {
     throw new Error('Not authenticated');
   }
 
+  // According to API spec, Authorization header should contain raw ID Token without "Bearer" prefix
   return {
-    'Authorization': `Bearer ${session.tokens.idToken.toString()}`,
+    'Authorization': session.tokens.idToken.toString(),
     'Content-Type': 'application/json',
   };
 };
@@ -55,7 +56,7 @@ export const fetchBuckets = async () => {
   try {
     const response = await makeAuthenticatedRequest(`${API_BASE_URL}/buckets`);
     const data = await response.json();
-    return data.buckets || [];
+    return data;
   } catch (error: any) {
     console.error('Error fetching buckets:', error);
     throw new Error(error.message || 'Failed to fetch buckets');
@@ -67,21 +68,18 @@ export const fetchBuckets = async () => {
  */
 export const fetchObjects = async (bucketName: string, prefix?: string) => {
   try {
-    const params = new URLSearchParams();
-    params.append('bucket', bucketName);
+    const url = new URL(`${API_BASE_URL}/buckets/${encodeURIComponent(bucketName)}/objects`);
+    
     if (prefix) {
-      params.append('prefix', prefix);
+      url.searchParams.append('prefix', prefix);
     }
 
-    const response = await makeAuthenticatedRequest(
-      `${API_BASE_URL}/objects?${params.toString()}`
-    );
-    
+    const response = await makeAuthenticatedRequest(url.toString());
     const data = await response.json();
     
     return {
-      CommonPrefixes: data.commonPrefixes || [],
-      Contents: data.contents || [],
+      CommonPrefixes: data.CommonPrefixes || [],
+      Contents: data.Contents || [],
     };
   } catch (error: any) {
     console.error('Error fetching objects:', error);
@@ -94,13 +92,13 @@ export const fetchObjects = async (bucketName: string, prefix?: string) => {
  */
 export const getPresignedUrl = async (bucket: string, key: string) => {
   try {
-    const params = new URLSearchParams();
-    params.append('bucket', bucket);
-    params.append('key', key);
-
-    const response = await makeAuthenticatedRequest(
-      `${API_BASE_URL}/presigned-url?${params.toString()}`
-    );
+    const response = await makeAuthenticatedRequest(`${API_BASE_URL}/presign`, {
+      method: 'POST',
+      body: JSON.stringify({
+        bucket: bucket,
+        key: key,
+      }),
+    });
     
     const data = await response.json();
     
